@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Copyright (c) 2026 Pawel Wladzinski <pawel.wladzinski@vayana.pl>
-"""Run using Checkmk 2.4's Python and installed public APIs (no service changes)."""
+"""Run using Checkmk 2.4/2.5 Python and its installed public plug-in APIs."""
 import importlib.util
 import copy
 import json
@@ -9,6 +9,18 @@ from pathlib import Path
 from cmk.agent_based.v2 import Metric, Result, Service
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Resolve the same add-on namespace used by an installed Checkmk site.
+import types
+import sys
+for package, directory in (
+    ('cmk_addons', ROOT / 'src'),
+    ('cmk_addons.plugins', ROOT / 'src'),
+):
+    if package not in sys.modules:
+        module = types.ModuleType(package)
+        module.__path__ = [str(directory)]
+        sys.modules[package] = module
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -49,6 +61,22 @@ for path in sorted((ROOT / 'src/morpheus/rulesets').glob('*.py')):
             print('Public rules API:', name, 'form constructed')
 module = load('server_calls', ROOT / 'src/morpheus/server_side_calls/special_agent.py')
 print('Public server-side calls API: configuration loaded')
+from cmk.server_side_calls.v1 import HostConfig, Secret, SpecialAgentCommand
+parameters = {
+    'url': 'https://morpheus.example.com', 'token': Secret(1),
+    'name_mode': 'name', 'prefix': 'example-vm-', 'zone_id': 1,
+    'collect_snapshots': True, 'collect_volumes': True,
+    'collect_virtual_switches': True, 'collect_alarms': True,
+    'collect_license': True, 'insecure': True,
+}
+commands = list(module.special_agent_morpheus(parameters, HostConfig(name='morpheus-api')))
+assert len(commands) == 1 and isinstance(commands[0], SpecialAgentCommand)
+arguments = commands[0].command_arguments
+assert arguments[arguments.index('--token') + 1] == Secret(1).unsafe()
+for option in ('--collect-snapshots', '--collect-volumes', '--collect-virtual-switches',
+               '--collect-alarms', '--collect-license', '--insecure'):
+    assert option in arguments
+print('Public server-side calls API: password reference and all feature arguments validated')
 
 # Infrastructure checks use the same runtime classes and current timestamps.
 infra = load('infrastructure', ROOT / 'src/morpheus/agent_based/infrastructure.py')
@@ -156,3 +184,56 @@ for item in ('CPU', 'Memory', 'Disk IO'):
     assert rows and all(isinstance(r, (Metric, Result)) for r in rows)
     assert all(r.state == State.OK for r in rows if isinstance(r, Result))
 print('Public API regressions: unclean/power-unknown host, cluster failure, per-metric sources and disk IOPS passed')
+
+# Evaluate the reported maintenance and partial-location scenarios using actual
+# Result/State constructors and the framework's severity aggregation.
+maintenance = copy.deepcopy(data)
+host = maintenance['hypervisors'][0]
+host.update(status='maintenancing', powerState='on', maintenanceMode=False,
+            serverGroupMemberStatus='online')
+rows = list(infra.check_hypervisor_state(infra.item_name(host), maintenance))
+assert State.worst(*(r.state for r in rows if isinstance(r, Result))) == State.WARN
+store = maintenance['datastores'][0]
+store.update(online=True, status='provisioned', maintenanceStatus='available',
+             locations=[{'refId': 1, 'status': 'provisioned'}, {'refId': 2, 'status': None}])
+rows = list(infra.check_datastore_state(infra.item_name(store), maintenance))
+assert State.worst(*(r.state for r in rows if isinstance(r, Result))) == State.WARN
+store['locations'].append({'refId': 3, 'status': 'failed'})
+rows = list(infra.check_datastore_state(infra.item_name(store), maintenance))
+assert State.worst(*(r.state for r in rows if isinstance(r, Result))) == State.CRIT
+host.update(status='maintenance', powerState='off', serverGroupMemberStatus='offline')
+for check in (infra.check_hypervisor_cpu, infra.check_hypervisor_memory, infra.check_hardware):
+    rows = list(check(infra.item_name(host), {}, maintenance))
+    assert State.worst(*(r.state for r in rows if isinstance(r, Result))) == State.WARN
+    assert not any(isinstance(r, Metric) for r in rows)
+host['serverGroupMemberStatus'] = 'fenced'
+rows = list(infra.check_hypervisor_state(infra.item_name(host), maintenance))
+assert State.worst(*(r.state for r in rows if isinstance(r, Result))) == State.CRIT
+print('Public status policy: maintenance and partial locations WARN; real failures CRIT')
+
+# Same-version revision: a known local pool can have unreported secondary
+# locations; explicit faults and shared/unknown storage remain evaluated.
+local = copy.deepcopy(data)
+store = local['datastores'][0]
+store.update(type='Directory Pool', externalType='dir', multipath={}, online=True,
+             status='provisioned', maintenanceStatus='available', locations=[
+                 {'refType': 'ComputeServer', 'refId': 1, 'status': 'provisioned'},
+                 {'refType': 'ComputeServer', 'refId': 2, 'status': None},
+             ])
+rows = list(infra.check_datastore_state(infra.item_name(store), local))
+assert State.worst(*(r.state for r in rows if isinstance(r, Result))) == State.OK
+assert any(isinstance(r, Result) and not r.summary and 'informational' in r.details for r in rows)
+store['type'] = 'NFS Pool'
+rows = list(infra.check_datastore_state(infra.item_name(store), local))
+assert State.worst(*(r.state for r in rows if isinstance(r, Result))) == State.WARN
+store['type'] = 'Directory Pool'
+store['locations'][1]['status'] = 'failed'
+rows = list(infra.check_datastore_state(infra.item_name(store), local))
+assert State.worst(*(r.state for r in rows if isinstance(r, Result))) == State.CRIT
+for used, expected in ((8, State.OK), (9, State.CRIT)):
+    source = {'license': {'success': True, 'data': {'limits': [
+        {'code': 'sockets', 'used': used, 'max': 8, 'warning': True, 'limitReached': True}
+    ]}}}
+    rows = list(extended.check_license_limit('sockets', source))
+    assert State.worst(*(r.state for r in rows if isinstance(r, Result))) == expected
+print('Public revision policy: local optional locations OK, shared gaps WARN, failures CRIT; 8/8 licensed sockets OK')

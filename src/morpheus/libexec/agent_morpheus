@@ -19,7 +19,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, build_opener, HTTPSHandler, HTTPRedirectHandler
 
-VERSION = '1.1.0'
+VERSION = '1.2.0'
+BUILD_REVISION = '2026-11-20'
 
 class CollectionError(Exception):
     pass
@@ -235,7 +236,7 @@ def collect_extensions(api, vms, infrastructure, features):
                 for uplink in item['uplinks'].get('data', []):
                     uplink['name'] = item['name'] + ' / ' + str(uplink.get('serverName') or uplink.get('serverId'))
                     host = next((h for h in infrastructure.get('hypervisors', []) if str(h['id']) == str(uplink.get('serverId'))), {})
-                    uplink['host'] = pick(host, ['powerState', 'status', 'serverGroupMemberStatus'])
+                    uplink['host'] = pick(host, ['powerState', 'status', 'maintenanceMode', 'serverGroupMemberStatus'])
                 assign_service_items(item['uplinks'].get('data', []))
                 result['virtual_switches'].append(item)
         assign_service_items(result['virtual_switches'])
@@ -514,7 +515,8 @@ def normalize_cluster(c):
 
 
 def normalize_datastore(ds, zone, cluster, capacity_map):
-    result = pick(ds, ['id', 'name', 'storageSize', 'freeSpace', 'online', 'active', 'status', 'statusMessage', 'maintenanceStatus', 'allowRead', 'allowWrite', 'allowProvision'])
+    result = pick(ds, ['id', 'name', 'type', 'externalType', 'storageSize', 'freeSpace', 'online', 'active', 'status', 'statusMessage', 'maintenanceStatus', 'allowRead', 'allowWrite', 'allowProvision'])
+    result['datastoreType'] = pick(ds.get('datastoreType') or {}, ['id', 'code', 'name'])
     result['zone'] = pick(zone, ['id', 'name'])
     result['cluster'] = pick(cluster or {}, ['id', 'name'])
     result['sync_timestamp'] = (cluster or {}).get('lastSync') or zone.get('lastSync')
@@ -528,7 +530,7 @@ def normalize_datastore(ds, zone, cluster, capacity_map):
             result['storageSize'] = None
             result['capacity_source'] = 'missing or conflicting'
     result['multipath'] = pick(ds.get('config') or {}, ['multipathPaths', 'multipathActive', 'multipathFailed', 'multipathState'])
-    result['locations'] = [pick(x, ['refType', 'refId', 'status', 'statusMessage']) for x in ds.get('locations', [])]
+    result['locations'] = [pick(x, ['refType', 'refId', 'status', 'statusMessage']) for x in (ds.get('locations') or [])]
     return result
 
 
@@ -551,6 +553,11 @@ def collect_infrastructure(api, clouds, zone_id=None, hardware_details=False):
     allowed = {str(z['id']) for z in clouds}
     raw_clusters = [c for c in raw_clusters if str((c.get('zone') or {}).get('id')) in allowed]
     result['clusters'] = [normalize_cluster(c) for c in raw_clusters]
+    hypervisors_by_id = {str(host['id']): host for host in result['hypervisors']}
+    for cluster in result['clusters']:
+        for member in cluster['members']:
+            host = hypervisors_by_id.get(str(member['id']), {})
+            member.update(pick(host, ['status', 'powerState', 'maintenanceMode']))
     capacities = {}
     for h in raw_hv:
         for v in h.get('volumes', []):
@@ -569,6 +576,16 @@ def collect_infrastructure(api, clouds, zone_id=None, hardware_details=False):
             normalized = normalize_datastore(ds, z, c, capacities)
             # Prefer the richer cluster response; publish a shared datastore only once.
             if key not in stores or not stores[key].get('cluster'):
+                previous = stores.get(key, {})
+                for field in ('type', 'externalType'):
+                    generic = field == 'type' and str(normalized.get(field) or '').lower() in ('generic', 'ext')
+                    if previous.get(field) and (not normalized.get(field) or generic):
+                        normalized[field] = previous[field]
+                normalized['datastoreType'] = {
+                    **previous.get('datastoreType', {}),
+                    **{field: value for field, value in normalized['datastoreType'].items()
+                       if value is not None and value != ''},
+                }
                 stores[key] = normalized
     result['datastores'] = list(stores.values())
     for key in ('clusters', 'hypervisors', 'datastores'):
@@ -605,7 +622,7 @@ def section(name, value):
     return '<<<' + name + ':sep(0)>>>\n' + json.dumps(value, ensure_ascii=True, separators=(',', ':')) + '\n'
 
 def render(data, duration):
-    out = section('morpheus_api', {'success': True, 'version': VERSION, 'vm_count': len(data['vms']), 'cloud_count': len(data['clouds']), 'duration': duration})
+    out = section('morpheus_api', {'success': True, 'version': VERSION, 'revision': BUILD_REVISION, 'vm_count': len(data['vms']), 'cloud_count': len(data['clouds']), 'duration': duration})
     out += section('morpheus_platform', data['health'])
     out += section('morpheus_clouds', data['clouds'])
     if data.get('infrastructure'):

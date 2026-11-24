@@ -75,7 +75,7 @@ class InfrastructureTests(unittest.TestCase):
         self.assertIn(State.CRIT,states(list(infra.check_datastore_usage(infra.item_name(ds),{},data))))
 
     def test_missing_capacity_unknown(self):
-        data=fixture();ds=next(x for x in data['datastores'] if x['storageSize'] is None)
+        data=fixture();ds=next(x for x in data['datastores'] if x['storageSize'] is None); ds['online']=True
         rows=list(infra.check_datastore_usage(infra.item_name(ds),{},data))
         self.assertIn(State.UNKNOWN,states(rows))
         self.assertFalse(any(r.args and r.args[0]=='morpheus_datastore_used_percent' for r in rows))
@@ -132,7 +132,7 @@ class InfrastructureTests(unittest.TestCase):
     def test_cluster_unknown_status_is_not_masked(self):
         data=fixture();c=data['clusters'][0];name=infra.item_name(c)
         c['status']='unexpected-status'
-        self.assertIn(State.UNKNOWN,states(list(infra.check_cluster(name,{},data))))
+        self.assertIn(State.WARN,states(list(infra.check_cluster(name,{},data))))
         c['status']='error'
         self.assertIn(State.CRIT,states(list(infra.check_cluster(name,{},data))))
 

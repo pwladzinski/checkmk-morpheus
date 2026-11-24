@@ -5,6 +5,9 @@ import json
 import math
 from datetime import datetime, timezone
 from cmk.agent_based.v2 import AgentSection, CheckPlugin, Service, Result, State, Metric
+from cmk_addons.plugins.morpheus.lib.status import (
+    host_blocked, operational_state, power_state, status_key, status_text,
+)
 
 
 def parse(string_table):
@@ -31,9 +34,9 @@ def check_vm_power(item, params, section):
         if vm_power_item(vm) != item:
             continue
         raw = str(vm.get('powerState') or 'unknown')
-        power = raw.lower()
+        power = power_state(raw)
         if power not in POWER_LABELS:
-            yield Result(state=State.UNKNOWN, summary=f'Unrecognized power state: {raw}', details=inventory_vm_label(vm))
+            yield Result(state=State.WARN, summary=f'Power state not confirmed: {raw}', details=inventory_vm_label(vm))
             return
         expected = params.get('expected_power', 'any')
         mismatch = expected != 'any' and expected != power
@@ -58,11 +61,11 @@ def inventory_vm_label(vm):
 
 
 def check_vm_inventory(section):
-    groups = {'Powered ON': [], 'Powered OFF': [], 'Suspended': [], 'Other / unknown': []}
-    labels = {'on': 'Powered ON', 'off': 'Powered OFF', 'suspended': 'Suspended'}
+    groups = {'Powered ON': [], 'Powered OFF': [], 'Suspended': [], 'Paused': [], 'Other / unknown': []}
+    labels = POWER_LABELS
     for vm in section['vms']:
         power = str(vm.get('powerState') or 'unknown')
-        group = labels.get(power.lower(), 'Other / unknown')
+        group = labels.get(power_state(power), 'Other / unknown')
         entry = inventory_vm_label(vm)
         groups[group].append(f'{entry}: {power}' if group == 'Other / unknown' else entry)
     summary = ', '.join(f'{label}: {len(vms)}' for label, vms in groups.items())
@@ -70,7 +73,7 @@ def check_vm_inventory(section):
         f'{label} ({len(vms)})\n' + '\n'.join(sorted(vms, key=str.casefold))
         for label, vms in groups.items() if vms
     )
-    yield Result(state=State.OK, summary=f'{inventory_scope(section)}: {summary}', details=details or summary)
+    yield Result(state=State.WARN if groups['Other / unknown'] else State.OK, summary=f'{inventory_scope(section)}: {summary}', details=details or summary)
 
 
 def discover_inventory_snapshots(section):
@@ -89,7 +92,7 @@ def check_inventory_snapshots(section):
     if missing:
         summary = f'{inventory_scope(section)}: {total} known snapshots; incomplete coverage ({len(vms) - len(missing)}/{len(vms)} VMs)'
         unavailable = '\n'.join(inventory_vm_label(vm) for vm in missing)
-        yield Result(state=State.UNKNOWN, summary=summary, details='\n'.join(filter(None, (details, 'Snapshot data unavailable for:', unavailable))))
+        yield Result(state=State.WARN if len(missing) < len(vms) else State.UNKNOWN, summary=summary, details='\n'.join(filter(None, (details, 'Snapshot data unavailable for:', unavailable))))
         return
     yield Metric('morpheus_snapshot_count', total)
     summary = f'{inventory_scope(section)}: {total} snapshots across {len(vms)} VMs'
@@ -115,7 +118,7 @@ def elapsed(timestamp):
 
 def failure(dataset):
     if not isinstance(dataset, dict) or dataset.get('success') is not True:
-        return Result(state=State.UNKNOWN, summary='API collection unavailable: ' + str((dataset or {}).get('error', 'dataset missing')))
+        return Result(state=State.UNKNOWN, summary='API collection unavailable: ' + str(dataset.get('error', 'dataset missing') if isinstance(dataset, dict) else 'dataset missing or invalid'))
     return None
 
 
@@ -144,11 +147,14 @@ def check_snapshots(params, section):
     ages, invalid_dates = [], []
     has_failure = False
     for snapshot in items:
-        status = str(snapshot.get('status') or snapshot.get('state') or 'unknown').lower()
+        status = status_key(snapshot.get('status') or snapshot.get('state'))
         name = str(snapshot.get('name') or snapshot['id'])
-        if status in ('error', 'failed', 'failure'):
+        severity = operational_state(status)
+        if severity == State.CRIT:
             has_failure = True
-            yield Result(state=State.CRIT, summary=name + ': ' + status)
+            yield Result(state=State.CRIT, summary=name + ': ' + status_text(status))
+        elif severity == State.WARN:
+            yield Result(state=State.WARN, summary=name + ': ' + status_text(status))
         age = elapsed(snapshot.get('snapshotCreated') or snapshot.get('dateCreated'))
         if age is None or age < -300:
             invalid_dates.append(name)
@@ -162,7 +168,7 @@ def check_snapshots(params, section):
         yield Metric('morpheus_snapshot_oldest_age', oldest, levels=(warn, crit))
         has_failure = has_failure or oldest >= crit
     for name in invalid_dates:
-        yield Result(state=State.OK if has_failure else State.UNKNOWN, summary='Missing/invalid/future creation time: ' + name)
+        yield Result(state=State.WARN if has_failure else State.UNKNOWN, summary='Missing/invalid/future creation time: ' + name)
     sizes = [s.get('maxStorage') for s in items]
     if all(num(v) and v >= 0 for v in sizes):
         yield Metric('morpheus_snapshot_size_bytes', sum(sizes))
@@ -177,9 +183,9 @@ def discover_volumes(section):
 def check_volume(item, section):
     volume = next((v for v in section.get('volumes', []) if item_name(v) == item), None)
     if volume is None:
-        yield Result(state=State.UNKNOWN, summary='Volume absent from current API inventory'); return
-    status = str(volume.get('status') or 'unknown').lower()
-    state = State.CRIT if volume.get('online') is False or status in ('failed', 'error', 'offline') else State.WARN if status in ('warning', 'degraded') else State.OK if status in ('provisioned', 'available', 'online', 'ok') else State.UNKNOWN
+        yield Result(state=State.WARN, summary='Volume absent from current API inventory'); return
+    status = status_text(volume.get('status'))
+    state = State.CRIT if volume.get('online') is False else operational_state(volume.get('status'))
     yield Result(state=state, summary=f'API volume status: {status}; online: {volume.get("online", "not reported")}')
     yield Result(state=State.OK, notice='Morpheus volume ID: ' + str(volume['id']))
     total, used = volume.get('maxStorage'), volume.get('usedStorage')
@@ -191,7 +197,7 @@ def check_volume(item, section):
             summary += f', API usedStorage: {used/2**30:.2f} GiB'
         yield Result(state=State.OK, summary=summary + '; guest filesystem usage not verified')
     else:
-        yield Result(state=State.UNKNOWN, summary='Volume capacity missing/invalid')
+        yield Result(state=State.WARN if state == State.CRIT else State.UNKNOWN, summary='Volume capacity missing/invalid')
     yield Result(state=State.OK, notice='Volume inventory has no independent measurement timestamp. No guest-fullness thresholds are applied; use guest filesystem checks for C:, D: or mount points.')
 
 
@@ -219,7 +225,7 @@ def check_license(params, section):
             summary=f'Earliest installed license expiration: {days:.1f} days remaining')
         yield Metric('morpheus_license_days_remaining', days)
     if invalid:
-        yield Result(state=State.OK if remaining and min(remaining) <= params.get('crit_days',7) else State.UNKNOWN,
+        yield Result(state=State.WARN if remaining and min(remaining) <= params.get('crit_days',7) else State.UNKNOWN,
             summary=f'License expiration date not reported/invalid for {invalid} installed licenses')
     yield Result(state=State.OK, notice='License information is appliance/account-wide, regardless of the cloud inventory filter.')
 
@@ -237,12 +243,23 @@ def check_license_limit(item, section):
         yield problem; return
     limit = next((v for v in dataset['data'].get('limits', []) if v.get('code') == item), None)
     if limit is None:
-        yield Result(state=State.UNKNOWN, summary='License limit absent or now unlimited; review discovery'); return
+        yield Result(state=State.WARN, summary='License limit absent or now unlimited; review discovery'); return
     used, maximum = limit.get('used'), limit.get('max')
+    if maximum is None:
+        yield Result(state=State.WARN, summary='License limit now unlimited or not reported; review discovery'); return
     if not num(used) or used < 0 or not num(maximum) or maximum < 0:
         yield Result(state=State.UNKNOWN, summary='License limit/usage missing or invalid'); return
-    state = State.CRIT if used > maximum else State.WARN if used == maximum or limit.get('warning') or limit.get('limitReached') else State.OK
-    yield Result(state=state, summary=f'License usage: {used:g}/{maximum:g}' + ('; capacity fully allocated' if used == maximum else ''))
+    # Reaching a socket entitlement is valid licensing, not an outage. API
+    # allocation flags do not override the validated used/max comparison.
+    state = State.CRIT if used > maximum else State.OK
+    meaning = 'licensed capacity exceeded' if used > maximum else 'within licensed capacity'
+    if used == maximum:
+        meaning += ' (fully allocated)'
+    yield Result(state=state, summary=f'License usage: {used:g}/{maximum:g}; {meaning}')
+    if limit.get('warning') or limit.get('limitReached'):
+        yield Result(state=State.OK, notice='API allocation flags: warning=' + str(limit.get('warning'))
+                     + ', limitReached=' + str(limit.get('limitReached'))
+                     + '; capacity state evaluated from used/max; native alarms remain separately monitored')
     yield Metric('morpheus_license_used', used)
     yield Metric('morpheus_license_limit', maximum)
     if maximum > 0: yield Metric('morpheus_license_usage_percent', 100*used/maximum)
@@ -258,11 +275,11 @@ def check_alarm_dataset(dataset):
     items = [a for a in dataset['data'] if a.get('active') is not False and a.get('acknowledged') is not True and not a.get('endDate')]
     critical, warning, unknown = [], [], []
     for alarm in items:
-        status = str(alarm.get('status') or '').lower()
+        status = status_key(alarm.get('status'))
         if status in ('critical', 'error', 'failed', 'fatal'): critical.append(alarm)
         elif status in ('warning', 'warn'): warning.append(alarm)
         elif status not in ('ok', 'healthy', 'info', 'informational', 'normal', 'resolved', 'closed'): unknown.append(alarm)
-    state = State.CRIT if critical else State.UNKNOWN if unknown else State.WARN if warning else State.OK
+    state = State.CRIT if critical else State.WARN if unknown or warning else State.OK
     yield Result(state=state, summary=f'Open unacknowledged alarms: {len(items)}; critical: {len(critical)}, warning: {len(warning)}, unknown severity: {len(unknown)}')
     for alarm in (critical + warning + unknown)[:5]:
         yield Result(state=State.OK, summary=str(alarm.get('name') or alarm['id'])[:200])
@@ -286,12 +303,13 @@ def discover_switches(section):
 def check_switch(item, section):
     switch = next((v for v in section.get('virtual_switches', []) if item_name(v) == item), None)
     if switch is None:
-        yield Result(state=State.UNKNOWN, summary='Virtual switch absent from current API inventory'); return
-    status = str(switch.get('status') or 'unknown').lower()
-    state = State.OK if status == 'available' else State.WARN if status in ('syncing', 'pending') else State.CRIT if status in ('error', 'failed') else State.UNKNOWN
+        yield Result(state=State.WARN, summary='Virtual switch absent from current API inventory'); return
+    status = status_text(switch.get('status'))
+    state = operational_state(switch.get('status'))
     yield Result(state=state, summary=f'Status: {status}; bond: {switch.get("bondMode")}; MTU: {switch.get("mtu")}')
     if switch.get('active') is False: yield Result(state=State.WARN, summary='Virtual switch inactive')
-    if problem := failure(switch.get('uplinks')): yield problem
+    if problem := failure(switch.get('uplinks')):
+        yield Result(state=State.WARN if state == State.CRIT else State.UNKNOWN, summary=problem.summary)
 
 
 def discover_uplinks(section):
@@ -304,15 +322,14 @@ def check_uplink(item, section):
         for uplink in switch.get('uplinks', {}).get('data', []):
             if item_name(uplink) != item: continue
             host = uplink.get('host', {})
-            member = str(host.get('serverGroupMemberStatus') or '').lower()
-            if host.get('powerState') == 'off' or member in ('unclean', 'offline', 'fenced', 'lost', 'unreachable', 'down'):
-                yield Result(state=State.CRIT, summary='Host unavailable; uplink realization cannot establish current network health'); return
-            status = str(uplink.get('syncStatus') or 'unknown').lower()
-            state = State.OK if status == 'in-sync' else State.WARN if status in ('pending', 'drifted') else State.CRIT if status in ('error', 'failed') else State.UNKNOWN
+            if host and (blocked := host_blocked(host)):
+                yield Result(state=blocked[0], summary='Host availability: ' + blocked[1]); return
+            status = status_text(uplink.get('syncStatus'))
+            state = operational_state(uplink.get('syncStatus'))
             yield Result(state=state, summary=f'Configuration: {status}; NICs: {uplink.get("nic1")}, {uplink.get("nic2")}')
             yield Result(state=State.OK, notice='Last configuration sync: ' + str(uplink.get('lastSyncDate')) + '; not a periodic link measurement. Physical carrier, LACP member health and NIC error counters are not verified by this endpoint.')
             return
-    yield Result(state=State.UNKNOWN, summary='Uplink absent from current API inventory')
+    yield Result(state=State.WARN, summary='Uplink absent from current API inventory')
 
 
 EXT = ['morpheus_extended']

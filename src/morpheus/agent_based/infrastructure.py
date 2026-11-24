@@ -6,6 +6,10 @@ import math
 import re
 from datetime import datetime, timezone
 from cmk.agent_based.v2 import AgentSection, CheckPlugin, Service, Result, State, Metric
+from cmk_addons.plugins.morpheus.lib.status import (
+    host_blocked, host_status_state, in_maintenance, membership_state,
+    operational_state, planned_offline, power_state, status_text,
+)
 
 
 def parse(string_table):
@@ -31,37 +35,15 @@ def find(section, key, item):
 
 
 def state(status):
-    status = str(status or 'unknown').lower()
-    if status in ('ok', 'healthy', 'online', 'provisioned', 'available', 'running', 'green'):
-        return State.OK
-    if status in ('warning', 'warn', 'degraded', 'yellow', 'nc', 'maintenance'):
-        return State.WARN
-    if status in ('error', 'failed', 'offline', 'critical', 'red', 'cr', 'nr', 'down'):
-        return State.CRIT
-    return State.UNKNOWN
+    return operational_state(status)
 
 
 def member_state(status):
-    # Membership failures are meaningful faults, not unknown enum values.
-    if str(status or '').lower() in ('unclean', 'fenced', 'unreachable', 'lost'):
-        return State.CRIT
-    return state(status)
+    return operational_state(status)
 
 
-def hypervisor_blocked(h):
-    """Return a reason/state when resource readings must not be trusted."""
-    membership = h.get('serverGroupMemberStatus')
-    if membership is not None and member_state(membership) == State.CRIT:
-        return State.CRIT, 'Membership: ' + str(membership)
-    if str(h.get('powerState') or '').lower() == 'off':
-        return State.CRIT, 'Power: off'
-    if state(h.get('status')) == State.CRIT:
-        return State.CRIT, 'Status: ' + str(h.get('status'))
-    if h.get('powerState') != 'on':
-        return State.UNKNOWN, 'Power state not confirmed on'
-    if membership is not None and member_state(membership) == State.UNKNOWN:
-        return State.UNKNOWN, 'Unknown membership: ' + str(membership)
-    return None
+def hypervisor_blocked(host):
+    return host_blocked(host)
 
 
 def unavailable_result(blocked):
@@ -76,10 +58,10 @@ def age(value):
     except (ValueError, TypeError, AttributeError): return None
 
 
-def age_results(timestamp, params):
+def age_results(timestamp, params, known_failure=False):
     elapsed = age(timestamp)
     if elapsed is None or elapsed < -300:
-        yield Result(state=State.UNKNOWN, summary='Missing/invalid/future source timestamp')
+        yield Result(state=State.WARN if known_failure else State.UNKNOWN, summary='Missing/invalid/future source timestamp')
         return
     warn, crit = params.get('age_warn', 900), params.get('age_crit', 1800)
     yield Result(state=State.CRIT if elapsed >= crit else State.WARN if elapsed >= warn else State.OK,
@@ -120,35 +102,86 @@ def discover_datastores(section):
     for ds in section.get('datastores', []): yield Service(item=item_name(ds))
 
 
+def datastore_scope(ds):
+    """Classify storage from API types, never from customer-chosen names."""
+    datatype = ds.get('datastoreType') or {}
+    values = (ds.get('type'), datatype.get('code'), datatype.get('name'))
+    types = {re.sub(r'[^a-z0-9]', '', str(value or '').lower()) for value in values}
+    external = str(ds.get('externalType') or '').strip().lower()
+    # Shared evidence wins over a generic directory-pool label. GFS2 can
+    # itself be exposed as a directory-backed libvirt pool.
+    shared = {'cluster', 'nfs', 'nfspool', 'nfsdatastore', 'vmfs', 'rbd',
+              'gfs2poolglobalfilesystem2', 'hpeclustereddatastoresharedlun'}
+    paths = ds.get('multipath') or {}
+    has_paths = any(num(paths.get(key)) and paths[key] > 0
+                    for key in ('multipathPaths', 'multipathActive', 'multipathFailed'))
+    path_status = str(paths.get('multipathState') or '').strip().lower()
+    if (types & shared or any('gfs2' in value or 'nfs' in value for value in types)
+            or external in ('netfs', 'nfs', 'rbd', 'dir:gfs2', 'gfs2')
+            or has_paths or path_status in ('active', 'failed', 'error', 'degraded')):
+        return 'shared'
+    if types & {'directorypool', 'directorydatastore', 'directorydatastorelocal'}:
+        return 'local'
+    return 'unclassified'
+
+
+def location_label(location, section):
+    reference = str(location.get('refType') or '').strip()
+    identity = str(location.get('refId', 'not reported'))
+    if reference.lower() in ('computeserver', 'server'):
+        host = next((host for host in section.get('hypervisors', [])
+                     if str(host.get('id')) == identity), None)
+        if host and host.get('name'):
+            return f"Host {host['name']} (ID {identity})"
+        return 'Host ID ' + identity
+    return 'Location ' + identity + (f' ({reference})' if reference else '')
+
+
 def check_datastore_state(item, section):
     ds = find(section, 'datastores', item)
     if ds is None:
-        yield Result(state=State.UNKNOWN, summary='Datastore absent from current inventory'); return
+        yield Result(state=State.WARN, summary='Datastore absent from current inventory'); return
     yield object_identity(ds)
     yield Result(state=State.OK, summary='Cloud: ' + str(ds.get('zone', {}).get('name')))
-    if 'online' in ds:
-        yield Result(state=State.OK if ds['online'] is True else State.CRIT, summary='Online: ' + str(ds['online']))
-    else:
-        yield Result(state=State.UNKNOWN, summary='Online state not reported')
+    online = ds.get('online')
+    yield Result(state=State.OK if online is True else State.CRIT if online is False else State.WARN,
+                 summary='Online: ' + status_text(online))
     if ds.get('active') is False: yield Result(state=State.WARN, summary='Datastore inactive')
-    if ds.get('status') is not None:
-        yield Result(state=state(ds['status']), summary='Status: ' + str(ds['status']))
+    yield Result(state=state(ds.get('status')), summary='Status: ' + status_text(ds.get('status')))
     maintenance = ds.get('maintenanceStatus')
     if maintenance is not None:
-        yield Result(state=State.OK if maintenance == 'available' else State.WARN, summary='Maintenance: ' + str(maintenance))
+        yield Result(state=state(maintenance), summary='Maintenance: ' + str(maintenance))
     if ds.get('statusMessage'):
         yield Result(state=State.OK, summary=str(ds['statusMessage']).replace('\n', ' ')[:300])
-    for loc in ds.get('locations', []):
-        yield Result(state=state(loc.get('status')), summary=f"Location {loc.get('refId')}: {loc.get('status')}")
+    locations = ds.get('locations') or []
+    scope = datastore_scope(ds)
+    yield Result(state=State.OK, notice='Datastore location policy: ' + scope
+                 + '; type: ' + status_text(ds.get('type'))
+                 + '; external type: ' + status_text(ds.get('externalType')))
+    optional_missing = (scope == 'local' and online is True
+                        and state(ds.get('status')) == State.OK
+                        and any(state(loc.get('status')) == State.OK for loc in locations))
+    for loc in locations:
+        status = loc.get('status')
+        label = location_label(loc, section)
+        message = str(loc.get('statusMessage') or '').replace('\n', ' ')[:300]
+        if (optional_missing and (status is None or isinstance(status, str) and not status.strip())
+                and str(loc.get('refType') or '').strip().lower() in ('computeserver', 'server')
+                and not message):
+            yield Result(state=State.OK, notice=label + ': status not reported; '
+                         'additional local directory-pool location is informational, host access not verified')
+        else:
+            yield Result(state=state(status), summary=label + ': ' + status_text(status)
+                         + ('; ' + message if message else ''))
 
 
 def check_datastore_usage(item, params, section):
     ds = find(section, 'datastores', item)
     if ds is None:
-        yield Result(state=State.UNKNOWN, summary='Datastore absent from current inventory'); return
+        yield Result(state=State.WARN, summary='Datastore absent from current inventory'); return
     yield object_identity(ds)
     if ds.get('online') is False:
-        yield Result(state=State.UNKNOWN, summary='Datastore offline; capacity not evaluated'); return
+        yield Result(state=State.CRIT, summary='Datastore offline; capacity unavailable'); return
     yield from age_results(ds.get('sync_timestamp'), params)
     if not fresh(ds.get('sync_timestamp'), params): return
     total, free = ds.get('storageSize'), ds.get('freeSpace')
@@ -171,20 +204,26 @@ def discover_multipath(section):
 def check_multipath(item, params, section):
     ds = find(section, 'datastores', item)
     if ds is None:
-        yield Result(state=State.UNKNOWN, summary='Datastore absent from inventory'); return
+        yield Result(state=State.WARN, summary='Datastore absent from inventory'); return
     yield object_identity(ds)
     yield Result(state=State.OK, notice='Datastore-level API counters; not a per-hypervisor path verification')
+    if ds.get('online') is False:
+        yield Result(state=State.CRIT, summary='Datastore offline; multipath readings not evaluated'); return
     yield from age_results(ds.get('sync_timestamp'), params)
     if not fresh(ds.get('sync_timestamp'), params): return
     p = ds.get('multipath', {})
+    path_status = state(p.get('multipathState'))
+    failed_state = path_status == State.CRIT
+    if failed_state:
+        yield Result(state=State.CRIT, summary='Multipath state: ' + status_text(p.get('multipathState')))
     paths, active, failed = p.get('multipathPaths'), p.get('multipathActive'), p.get('multipathFailed')
-    if not all(num(v) and v >= 0 for v in (paths, active, failed)) or active > paths or failed > paths:
-        yield Result(state=State.UNKNOWN, summary='Missing/inconsistent multipath counters'); return
+    if not all(num(v) and v >= 0 and int(v) == v for v in (paths, active, failed)) or active > paths or failed > paths or active + failed > paths:
+        yield Result(state=State.WARN if failed_state else State.UNKNOWN, summary='Missing/inconsistent multipath counters'); return
     minimum = params.get('min_paths', 2)
     s = State.CRIT if active == 0 else State.WARN if failed > 0 or active < paths or active < minimum else State.OK
     yield Result(state=s, summary=f'Active {active}/{paths}, failed {failed}; minimum active {minimum}; state: {p.get("multipathState", "unknown")}')
-    if str(p.get('multipathState')).lower() in ('failed', 'offline', 'error'):
-        yield Result(state=State.CRIT, summary='Multipath state indicates failure')
+    if path_status == State.WARN:
+        yield Result(state=State.WARN, summary='Multipath state: ' + status_text(p.get('multipathState')))
     for metric, value in [('active', active), ('failed', failed), ('paths', paths)]:
         yield Metric('morpheus_multipath_' + metric, value)
 
@@ -196,18 +235,21 @@ def discover_hypervisors(section):
 def check_hypervisor_state(item, section):
     h = find(section, 'hypervisors', item)
     if h is None:
-        yield Result(state=State.UNKNOWN, summary='Hypervisor absent from current inventory'); return
+        yield Result(state=State.WARN, summary='Hypervisor absent from current inventory'); return
     yield object_identity(h)
-    blocked = hypervisor_blocked(h)
-    definite_failure = blocked is not None and blocked[0] == State.CRIT
-    status_state = state(h.get('status'))
-    yield Result(state=State.OK if definite_failure and status_state == State.UNKNOWN else status_state, summary='Status: ' + str(h.get('status')))
-    power = h.get('powerState')
-    yield Result(state=State.OK if power == 'on' or definite_failure and power != 'off' else State.CRIT if power == 'off' else State.UNKNOWN, summary='Power: ' + str(power))
-    yield Result(state=State.WARN if h.get('maintenanceMode') else State.OK, summary='Maintenance: ' + str(h.get('maintenanceMode')))
+    yield Result(state=host_status_state(h), summary='Status: ' + status_text(h.get('status')))
+    power = power_state(h.get('powerState'))
+    severity = State.OK if power == 'on' else State.WARN if power != 'off' or planned_offline(h) else State.CRIT
+    yield Result(state=severity, summary='Power: ' + status_text(h.get('powerState')))
+    maintenance = in_maintenance(h)
+    yield Result(state=State.WARN if maintenance else State.OK,
+                 summary='Maintenance: ' + str(maintenance))
+    yield Result(state=State.OK, notice='API maintenanceMode: ' + status_text(h.get('maintenanceMode')))
     if h.get('serverGroupMemberStatus') is not None:
-        membership_state = member_state(h['serverGroupMemberStatus'])
-        yield Result(state=State.OK if definite_failure and membership_state == State.UNKNOWN else membership_state, summary='Membership: ' + str(h['serverGroupMemberStatus']))
+        membership = h['serverGroupMemberStatus']
+        severity = membership_state(h)
+        yield Result(state=severity, summary='Membership: ' + status_text(membership))
+
     yield Result(state=State.OK, summary=f"Cloud: {h.get('zone', {}).get('name')}; {h.get('maxCores')} cores; {h.get('platform')} {h.get('platformVersion')}")
 
 
@@ -222,7 +264,7 @@ def check_hypervisor_memory(item, params, section):
 def hypervisor_metric(item, params, section, kind):
     h = find(section, 'hypervisors', item)
     if h is None:
-        yield Result(state=State.UNKNOWN, summary='Hypervisor absent from current inventory'); return
+        yield Result(state=State.WARN, summary='Hypervisor absent from current inventory'); return
     yield object_identity(h)
     if blocked := hypervisor_blocked(h):
         yield unavailable_result(blocked); return
@@ -233,7 +275,7 @@ def hypervisor_metric(item, params, section, kind):
         yield from usage(stats.get('cpuUsage'), 'morpheus_hypervisor_cpu', 'CPU', params)
     else:
         used, total = stats.get('usedMemory'), stats.get('maxMemory')
-        if not num(used) or not num(total) or used < 0 or total <= 0:
+        if not num(used) or not num(total) or used < 0 or total <= 0 or used > total:
             yield Result(state=State.UNKNOWN, summary='Missing/invalid memory data'); return
         yield from usage(100 * used / total, 'morpheus_hypervisor_memory', 'Memory', params)
         yield Metric('morpheus_hypervisor_memory_used_bytes', used)
@@ -248,7 +290,7 @@ def discover_hardware(section):
 def check_hardware(item, params, section):
     h = find(section, 'hypervisors', item)
     if h is None:
-        yield Result(state=State.UNKNOWN, summary='Hypervisor absent from current inventory'); return
+        yield Result(state=State.WARN, summary='Hypervisor absent from current inventory'); return
     yield object_identity(h)
     if blocked := hypervisor_blocked(h):
         yield unavailable_result(blocked); return
@@ -259,9 +301,11 @@ def check_hardware(item, params, section):
     if not fresh(timestamp, params): return
     hw = h.get('hardware_summary', {})
     if not hw.get('count'):
-        yield Result(state=State.UNKNOWN, summary='Hardware sensors no longer reported'); return
+        yield Result(state=State.WARN, summary='Hardware sensors no longer reported'); return
     problems = hw.get('problems', [])
     yield Result(state=State.OK, summary=f"{hw.get('count')} sensors, {hw.get('unavailable')} not available, {len(problems)} non-OK")
+    if hw.get('unavailable', 0) >= hw['count']:
+        yield Result(state=State.WARN, summary='All hardware sensor readings are unavailable')
     for sensor in problems:
         yield Result(state=state(sensor.get('status')), summary=f"{sensor.get('name')}: {sensor.get('status')} {sensor.get('reading', '')}"[:300])
     yield Metric('morpheus_hardware_problems', len(problems))
@@ -292,7 +336,7 @@ def check_sensor(item, params, section):
                 metric = {'degrees C': 'temperature', 'RPM': 'rpm', 'Watts': 'watts', 'Volts': 'volts', 'percent': 'percent'}[match[2]]
                 yield Metric('morpheus_sensor_' + metric, float(match[1]))
             return
-    yield Result(state=State.UNKNOWN, summary='Sensor absent from current response')
+    yield Result(state=State.WARN, summary='Sensor absent from current response')
 
 
 def discover_clusters(section):
@@ -302,20 +346,24 @@ def discover_clusters(section):
 def check_cluster(item, params, section):
     c = find(section, 'clusters', item)
     if c is None:
-        yield Result(state=State.UNKNOWN, summary='Cluster absent from current inventory'); return
+        yield Result(state=State.WARN, summary='Cluster absent from current inventory'); return
     yield object_identity(c)
     cluster_status = str(c.get('status') or 'unknown').lower()
     # A normal inventory refresh must not flap the cluster service. The
     # existing lastSync age and member checks remain independent safeguards.
     yield Result(state=State.OK if cluster_status == 'syncing' else state(cluster_status),
                  summary='Status: ' + cluster_status)
-    yield from age_results(c.get('lastSync'), params)
+    has_failure = state(cluster_status) == State.CRIT or any(
+        membership_state(member) == State.CRIT
+        for member in c.get('members', [])
+    ) or (params.get('expect_ha') and c.get('ha_enabled') is not True)
+    yield from age_results(c.get('lastSync'), params, known_failure=has_failure)
     yield Result(state=State.OK, summary=f"{len(c.get('members', []))} members; HA enabled: {c.get('ha_enabled', 'not reported')}")
     members = c.get('members', [])
     if not members:
-        yield Result(state=State.UNKNOWN, summary='No cluster members reported')
+        yield Result(state=State.WARN, summary='No cluster members reported')
     for member in members:
-        yield Result(state=member_state(member.get('serverGroupMemberStatus')), summary=f"{member.get('name')}: {member.get('serverGroupMemberStatus')}")
+        yield Result(state=membership_state(member), summary=f"{member.get('name')}: {status_text(member.get('serverGroupMemberStatus'))}")
     if members and fresh(c.get('lastSync'), params):
         online = sum(str(m.get('serverGroupMemberStatus') or '').lower() == 'online' for m in members)
         yield Result(state=State.OK, summary=f'Online members: {online}/{len(members)} (inventory, not quorum)')
@@ -336,7 +384,7 @@ def check_cluster_memory(item, params, section):
 def cluster_metric(item, params, section, kind):
     c = find(section, 'clusters', item)
     if c is None:
-        yield Result(state=State.UNKNOWN, summary='Cluster absent from inventory'); return
+        yield Result(state=State.WARN, summary='Cluster absent from inventory'); return
     yield object_identity(c)
     yield from age_results(c.get('lastSync'), params)
     if not fresh(c.get('lastSync'), params): return
@@ -345,7 +393,7 @@ def cluster_metric(item, params, section, kind):
         yield from usage(stats.get('cpuUsageAvg'), 'morpheus_cluster_cpu_avg', 'Worker CPU average', params)
     else:
         used, total = stats.get('usedMemory'), stats.get('maxMemory')
-        if not num(used) or not num(total) or used < 0 or total <= 0:
+        if not num(used) or not num(total) or used < 0 or total <= 0 or used > total:
             yield Result(state=State.UNKNOWN, summary='Missing/invalid workerStats memory data'); return
         yield from usage(100 * used / total, 'morpheus_cluster_memory', 'workerStats memory', params)
         yield Metric('morpheus_cluster_memory_used_bytes', used)

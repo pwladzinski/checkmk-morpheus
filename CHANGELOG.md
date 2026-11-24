@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.0 — 2026-11-19, revised 2026-11-20
+
+- Support the public plugin APIs of Checkmk 2.4 and 2.5. Set manifest minimum to `2.4.0` and Until Version to `2.5.0p99` (exclusive, as defined by Checkmk).
+- Share operational-state mapping across appliance, cloud, VM, datastore, hypervisor, cluster, sensor and optional checks. Lifecycle, missing and unrecognized operational statuses now produce WARN; explicit failures remain CRIT.
+- Recognize `maintenancing` before the API maintenance flag changes. Show maintenance derived from the flag or status and retain the raw flag in Details.
+- Treat powered-off/offline hosts in completed or explicitly flagged maintenance as WARN. Preserve CRIT for unclean/fenced/unreachable/lost membership, explicit host faults and power loss before maintenance is complete or flagged.
+- Carry maintenance context into cluster members and uplink availability checks. Suppress unavailable host readings instead of publishing healthy zeros.
+- Show missing datastore-location status as `not reported` with WARN, except informational secondary host statuses on a positively identified local directory pool with healthy/online overall state and a healthy location baseline. Resolve typed location references to host names. Preserve type metadata when merging cloud/cluster listings; never infer locality from names. Distinguish `online: null` from an explicit offline state.
+- License capacity at or below its entitlement is OK, even if allocation flags are set; usage above the finite limit is CRIT. Preserve license expiry/native alarm checks.
+- Keep version 1.2.0 for this revision; expose collector build revision 2026-11-20 in Morpheus API Details and document same-version reinstallation.
+- Warn for partial snapshot coverage, unknown alarm severity, absent inventory items and license limits that become unlimited. Preserve UNKNOWN for invalid measurements and unavailable API datasets.
+- Keep failed multipath state critical even when counters are incomplete; suppress path metrics for offline datastores and validate counters/memory pairs before emitting usage metrics.
+- Preserve existing service/host/metric/rule names, cache timestamps, graph priority and thresholds. Add no endpoint or permission requirement.
+- Build deterministic MKP archives; add a package/source integrity validator and current English upgrade, status and publication guides.
+
+## 1.1.1 — compatibility package
+
+- Site compatibility update: extend the package version bound to permit Checkmk 2.5 sites. No monitoring logic change from 1.1.0. Superseded by the explicit bounds and two-version API validation in 1.2.0.
+
 ## 1.1.0 — 2026-11-09
 
 - Public feature release consolidating the changes from 1.0.5 through 1.0.8.

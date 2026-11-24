@@ -1,27 +1,37 @@
-..............................................................................................................................
-----------------------------------------------------------------------
-Ran 126 tests in 0.083s
+HPE Morpheus Monitoring 1.2.0 — build revision 2026-11-20
+Python 3.12.14. Minimum Checkmk 2.4.0; Until Version 2.5.0p99 (exclusive).
+The package version intentionally remains 1.2.0; this revision supersedes
+its earlier supplied archive. See docs/REVISION_1.2.0_2026-11-20.md.
 
-OK
-Public agent API: 15 sample services evaluated successfully
-Public agent API: CPU above 100% accepted without clipping or normalization
-Public rules API: rule_spec_morpheus_platform form constructed
-Public rules API: rule_spec_morpheus_clouds form constructed
-Public rules API: rule_spec_morpheus_vm form constructed
-Public rules API: rule_spec_morpheus_vm_power form constructed
-Public rules API: rule_spec_morpheus_vm_metrics form constructed
-Public rules API: rule_spec_morpheus_datastore_usage form constructed
-Public rules API: rule_spec_morpheus_multipath form constructed
-Public rules API: rule_spec_morpheus_infra_metrics form constructed
-Public rules API: rule_spec_morpheus_cluster_state form constructed
-Public rules API: rule_spec_morpheus_hardware form constructed
-Public rules API: rule_spec_morpheus_snapshots form constructed
-Public rules API: rule_spec_morpheus_license form constructed
-Public rules API: rule_spec_morpheus form constructed
-Public server-side calls API: configuration loaded
-Infrastructure API: 475 sample services evaluated, including 35 without detailed sensors
-Extended API: 13 snapshot/volume/license/alarm/switch/uplink sample services evaluated
-Public graphing API: metrics and graphs constructed
-Graphing coverage: 59 named metrics, 40 primary graphs, 13 perfometers; age auxiliary; MiB-to-byte conversion checked
-Check default parameter keys match all rule forms
-Public API regressions: unclean/power-unknown host, cluster failure, per-metric sources and disk IOPS passed
+REGRESSION TESTS
+Command: python3 -m unittest discover -s tests -v
+170 tests passed, including 15 added location/license revision regressions.
+Function-level tests use a small API result-object shim, not a monitoring core.
+
+PUBLIC PLUGIN API VALIDATION — actual official API classes
+Command on each corresponding site: python3 tests/validate_public_api.py
+2.4.0p26 commit 4ba58f6610852472b1aa27bbfdd867f991b39728: PASS
+2.5.0p19 commit 8efcf83a153b201ce640a6c1da9de9c52d9c3650: PASS
+Separate processes on Python 3.12.14. For each snapshot:
+15 platform/VM services; 475 infrastructure services (35 without detailed
+sensors); 13 extended services; 13 rule forms; 59 metric definitions;
+40 primary graphs; 13 Perf-O-Meters. Password reference/command arguments,
+matching defaults and real State.worst aggregation: PASS.
+Local optional locations: OK with a healthy baseline; shared/unclassified
+gaps: WARN; explicit failures: CRIT. License 8/8 with allocation flags: OK;
+9/8: CRIT. Invalid measurements remain unavailable. All checks: PASS.
+
+PACKAGE VALIDATION
+Command: python3 tests/validate_package.py --mkp package/morpheus-1.2.0.mkp
+Ten exact source files; matching manifests; version bounds; safe paths and
+modes: PASS. Collector executable 0755, other installed files 0644.
+Official MKP parsers/extraction for 2.4.0p26 and 2.5.0p19: PASS.
+Two consecutive builds produce identical MKP bytes: PASS.
+Source privacy/language/syntax/local-document-link review: PASS.
+
+BOUNDARY
+No live Checkmk core, GUI or Morpheus appliance is available in the build
+environment. Run target-site plugin, collection and acceptance checks.
+The same-version reinstallation sequence is in docs/UPGRADE_1.2.0.md.
+
+MKP SHA256: 6ea1b12d1aaa35b39f1dc56a609a962b7eff7724cc5f29997c6d71f2366c79c6

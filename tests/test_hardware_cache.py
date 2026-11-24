@@ -63,14 +63,14 @@ class HardwareCacheTests(unittest.TestCase):
         rows=list(infra.check_hardware(infra.item_name(h),{'age_warn':120,'age_crit':900},{'hypervisors':[h]}))
         self.assertIn(State.CRIT,states(rows))
 
-    def test_no_history_stays_unknown(self):
+    def test_missing_sensors_warn_without_history(self):
         h=host();h['stats'].pop('sensors')
         class API:
             def get(self,endpoint):return {'server':h}
         snap,source=agent.resolve_hardware(API(),h)
         h=agent.normalize_hypervisor(h,snapshot=snap,hardware_source=source)
         rows=list(infra.check_hardware(infra.item_name(h),{}, {'hypervisors':[h]}))
-        self.assertIn(State.UNKNOWN,states(rows))
+        self.assertIn(State.WARN,states(rows))
 
     def test_corrupted_cache_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
