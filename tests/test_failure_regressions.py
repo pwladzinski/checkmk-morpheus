@@ -42,7 +42,7 @@ class FailureTests(unittest.TestCase):
         data, h, item = self.failed_host()
         h.update(powerState='on', status='provisioned', serverGroupMemberStatus='unrecognized')
         rows = list(infra.check_hypervisor_cpu(item, {}, data))
-        self.assertEqual(max(states(rows)), State.UNKNOWN)
+        self.assertEqual(max(states(rows)), State.WARN)
         self.assertFalse(any(r.args for r in rows))
 
     def test_power_off_blocks_readings_even_with_online_membership(self):
@@ -73,7 +73,7 @@ class FailureTests(unittest.TestCase):
 
     def test_empty_membership_is_not_healthy(self):
         data = fixture(); c = data['clusters'][0]; c['members'] = []
-        self.assertIn(State.UNKNOWN, states(list(infra.check_cluster(infra.item_name(c), {}, data))))
+        self.assertIn(State.WARN, states(list(infra.check_cluster(infra.item_name(c), {}, data))))
 
 
 class IndependentMetricTests(unittest.TestCase):

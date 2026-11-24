@@ -4,6 +4,9 @@ import json
 import math
 from datetime import datetime, timezone
 from cmk.agent_based.v2 import AgentSection, CheckPlugin, Service, Result, State, Metric
+from cmk_addons.plugins.morpheus.lib.status import (
+    operational_state, power_state, status_key, status_text,
+)
 
 
 def parse(string_table):
@@ -44,17 +47,10 @@ def freshness(value, warn, crit):
 
 
 def status_result(obj, good):
-    status = str(obj.get('status') or 'unknown').lower()
-    if obj.get('success') is False:
-        state = State.CRIT
-    elif status in good:
-        state = State.OK
-    elif status in ('warning', 'warn', 'degraded', 'yellow'):
-        state = State.WARN
-    elif status in ('error', 'failed', 'critical', 'offline', 'red'):
-        state = State.CRIT
-    else:
-        state = State.UNKNOWN
+    status = status_key(obj.get('status'))
+    state = State.CRIT if obj.get('success') is False else operational_state(status, good)
+    status = status_text(obj.get('status'))
+
     msg = str(obj.get('statusMessage') or '').replace('\n', ' ')[:300]
     yield Result(state=state, summary=status + (': ' + msg if msg else ''))
 
@@ -77,6 +73,9 @@ def check_api(section):
         yield Result(state=State.CRIT, summary=section.get('message') or 'API collection failed')
         return
     yield Result(state=State.OK, summary=f"Collected {section['vm_count']} VMs, {section['cloud_count']} clouds")
+    if section.get('revision'):
+        yield Result(state=State.OK, notice='Collector version: ' + str(section.get('version'))
+                     + '; build revision: ' + str(section['revision']))
     yield Metric('morpheus_api_duration', section['duration'])
     yield Metric('morpheus_vm_count', section['vm_count'])
 
@@ -144,7 +143,7 @@ def discover_clouds(section):
 def check_clouds(item, params, section):
     cloud = next((c for c in section if str(c.get('service_item') or c.get('name') or ('ID ' + str(c['id']))) == item), None)
     if cloud is None:
-        yield Result(state=State.UNKNOWN, summary='Cloud no longer in returned inventory')
+        yield Result(state=State.WARN, summary='Cloud no longer in returned inventory')
         return
     yield Result(state=State.OK, summary=str(cloud.get('name', item)))
     yield Result(state=State.OK, notice='Morpheus cloud ID: ' + str(cloud['id']))
@@ -161,18 +160,18 @@ check_plugin_morpheus_clouds = CheckPlugin(name='morpheus_clouds', service_name=
 
 def check_vm(params, section):
     yield Result(state=State.OK, summary=f"{section.get('name')} (ID {section['id']}), cloud: {section.get('zone', {}).get('name')}, hypervisor: {section.get('parentServer', {}).get('name')}")
-    yield from status_result(section, {'provisioned', 'running', 'stopped', 'off', 'on', 'suspended'})
-    power = str(section.get('powerState') or 'unknown').lower()
+    yield from status_result(section, {'provisioned', 'running', 'stopped', 'off', 'on', 'suspended', 'paused'})
+    power = power_state(section.get('powerState'))
     expected = params.get('expected_power', 'any')
     if power not in ('on', 'off', 'suspended', 'paused'):
-        yield Result(state=State.UNKNOWN, summary='Power: ' + power)
+        yield Result(state=State.WARN, summary='Power: ' + status_text(section.get('powerState')))
     else:
         yield Result(state=State.CRIT if expected != 'any' and power != expected else State.OK, summary='Power: ' + power)
     guest = section.get('guestAgentStatus', 'unknown')
     yield Result(state=State.WARN if params.get('expect_guest_agent', False) and power == 'on' and guest != 'connected' else State.OK,
                  summary='Morpheus guest agent: ' + str(guest))
     if section.get('maintenanceMode'):
-        yield Result(state=State.OK, summary='Morpheus maintenance mode enabled')
+        yield Result(state=State.WARN, summary='Morpheus maintenance mode enabled')
 
 check_plugin_morpheus_vm = CheckPlugin(name='morpheus_vm', service_name='Morpheus VM',
     discovery_function=discover_single, check_function=check_vm,
@@ -190,8 +189,10 @@ def discover_vm_metrics(section):
 
 
 def check_vm_metrics(item, params, section):
-    if section.get('powerState') != 'on':
-        yield Result(state=State.OK, summary='VM not powered on; metrics not evaluated')
+    power = power_state(section.get('powerState'))
+    if power != 'on':
+        yield Result(state=State.OK if power in ('off', 'paused', 'suspended') else State.WARN,
+                     summary='VM power: ' + status_text(section.get('powerState')) + '; metrics unavailable while power is not confirmed on')
         return
     snapshots = section.get('metric_snapshots')
     sample = snapshots.get(item, {}) if isinstance(snapshots, dict) else {
@@ -227,7 +228,7 @@ def check_vm_metrics(item, params, section):
     else:
         suffix = 'Memory' if item == 'Memory' else 'Storage'
         used, total = stats.get('used' + suffix), stats.get('max' + suffix)
-        if not number(used) or not number(total) or used < 0 or total <= 0:
+        if not number(used) or not number(total) or used < 0 or total <= 0 or (item == 'Memory' and used > total):
             detail = section.get('stats_detail_status')
             yield Result(state=State.UNKNOWN, summary='No valid usage/capacity data' + ('; ' + detail if detail else ''))
             return

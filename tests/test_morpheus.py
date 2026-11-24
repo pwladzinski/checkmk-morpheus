@@ -13,6 +13,16 @@ from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+# Resolve the same add-on namespace used by an installed Checkmk site.
+for package, directory in (
+    ('cmk_addons', ROOT / 'src'),
+    ('cmk_addons.plugins', ROOT / 'src'),
+):
+    if package not in sys.modules:
+        module = types.ModuleType(package)
+        module.__path__ = [str(directory)]
+        sys.modules[package] = module
+
 def load(name, path):
     loader = importlib.machinery.SourceFileLoader(name, str(path))
     spec = importlib.util.spec_from_loader(name, loader)

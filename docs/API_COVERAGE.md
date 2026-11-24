@@ -1,6 +1,6 @@
-# API coverage review — 1.0.6
+# API coverage review — 1.2.0
 
-Review date: 2026-11-05. This review compares the integration with supplied HVM API samples, its collector whitelist and public Morpheus documentation/OpenAPI. Documentation describes capabilities; it does not establish that a particular appliance, token or provider returns every field.
+Updated: 2026-11-20, retaining the API evidence reviewed on 2026-11-05. This review compares the integration with supplied HVM API samples, its collector whitelist and public Morpheus documentation/OpenAPI. Documentation describes capabilities; it does not establish that a particular appliance, token or provider returns every field.
 
 ## Implemented in this release
 
@@ -10,13 +10,13 @@ Review date: 2026-11-05. This review compares the integration with supplied HVM 
 | Cloud | State and synchronization age. |
 | Hypervisor | Power, provisioning status, maintenance, cluster membership, CPU, RAM and hardware sensor summary/optional individual sensors. Explicit member failures suppress misleading usage/sensor readings. |
 | Cluster | State, member failures, online/total inventory member counts and graphs, synchronization age, reported HA flag and worker CPU/RAM. |
-| Datastore | Online/provisioning/location/maintenance state; capacity; datastore-level multipath counters. |
+| Datastore | Online/provisioning/location/maintenance state; capacity; datastore-level multipath counters. API type metadata qualifies optional local host-status gaps; typed location references resolve host names where available. |
 | VM | Power/state, optional guest-agent expectation, CPU, RAM and API storage with independent last-valid metric groups. |
 | VM disk IO | New optional **Morpheus VM Disk IO** item: timestamped `readIOPS` and `writeIOPS`, already present in supplied API samples. Graphs preserve API values, including zeros. |
 
-No additional endpoint or token permission is required by the 1.0.6 monitoring changes. Disk IO is discovered conditionally. The package remains read-only.
+No additional endpoint or token permission is required by the 1.2.0 status-policy changes. Disk IO is discovered conditionally. The package remains read-only. Maintenance context is carried from existing hypervisor data into cluster and uplink checks; see [STATUS_POLICY.md](STATUS_POLICY.md).
 
-## Additional opt-in coverage in 1.0.6
+## Existing opt-in coverage
 
 Observed manager API responses confirmed snapshot-list access, virtual-switch/uplink configuration, operational health alarms and finite-license usage. The integration adds these controls behind explicit rule options. Collection errors are not represented as healthy empty datasets. Snapshot lists were empty in the observed deployment; non-empty age/size cases have local schema-based regression coverage and require live acceptance.
 
@@ -40,7 +40,7 @@ Per-volume status/capacity/usedStorage values are exposed as API inventory. No g
 - Cluster membership counts are inventory counts, not a quorum computation. A member removed from current inventory cannot be detected without a separately configured expected-member baseline.
 - `ha_enabled` is the API's existing configuration flag. It is not an end-to-end HA readiness test and may need layout/version-specific interpretation.
 - A datastore can be available through a surviving host while another host is down. `Active 2/2` is not proof of four working paths across two hosts.
-- Hypervisor unavailability alarms do not distinguish an intentional shutdown from an unplanned failure. No automatic downtime or suppression is introduced.
+- Completed or explicitly flagged maintenance can identify a planned offline host and produce WARN. Without that evidence, an offline/powered-off host remains CRIT. Fencing and explicit failures remain CRIT even during maintenance. No automatic downtime is introduced.
 - A connected guest agent is not proof of fresh/complete resource statistics. Data age is checked independently.
 - Independent caches reduce unnecessary cross-metric staleness but cannot recover values that the collector never receives. Missing values never become fabricated zeros.
 

@@ -49,11 +49,11 @@ class ExtendedTests(unittest.TestCase):
         vm['snapshots']['data'][0].update(status='available', dateCreated='bad')
         self.assertIn(State.UNKNOWN, states(list(extended.check_snapshots({}, vm))))
 
-    def test_license_full_allocation_warns_and_null_is_unlimited(self):
+    def test_license_full_allocation_is_valid_and_null_is_unlimited(self):
         source = fixture()['extensions']
         self.assertEqual([s.item for s in extended.discover_license_limits(source)], ['maxMvmSockets'])
         rows = list(extended.check_license_limit('maxMvmSockets', source))
-        self.assertEqual(max(states(rows)), State.WARN)
+        self.assertEqual(max(states(rows)), State.OK)
         self.assertEqual(metric(rows, 'morpheus_license_usage_percent'), 100)
         source['license']['data']['limits'][0]['used'] = 3
         self.assertIn(State.CRIT, states(list(extended.check_license_limit('maxMvmSockets', source))))
@@ -61,7 +61,7 @@ class ExtendedTests(unittest.TestCase):
     def test_zero_license_limit_is_enforced_without_dividing_by_zero(self):
         section = {'license': {'success': True, 'data': {'limits': [{'code': 'zero', 'max': 0, 'used': 0}]}}}
         rows = list(extended.check_license_limit('zero', section))
-        self.assertEqual(max(states(rows)), State.WARN)
+        self.assertEqual(max(states(rows)), State.OK)
         self.assertFalse(any(r.args and r.args[0]=='morpheus_license_usage_percent' for r in rows))
 
     def test_license_expiry_and_missing_date(self):
@@ -84,7 +84,7 @@ class ExtendedTests(unittest.TestCase):
 
     def test_unknown_alarm_severity_is_not_ok(self):
         rows = list(extended.check_alarm_dataset({'success': True, 'data': [{'id': 1, 'status': 'new-severity'}]}))
-        self.assertIn(State.UNKNOWN, states(rows))
+        self.assertIn(State.WARN, states(rows))
 
     def test_uplink_old_sync_time_is_not_treated_as_measurement_age(self):
         section = fixture()['extensions']; name = list(extended.discover_uplinks(section))[0].item
@@ -95,7 +95,7 @@ class ExtendedTests(unittest.TestCase):
     def test_uplink_drift_error_and_host_down(self):
         section = fixture()['extensions']; uplink = section['virtual_switches'][0]['uplinks']['data'][0]
         name = list(extended.discover_uplinks(section))[0].item
-        for status, state in (('drifted', State.WARN), ('pending', State.WARN), ('error', State.CRIT), ('unknown-new', State.UNKNOWN)):
+        for status, state in (('drifted', State.WARN), ('pending', State.WARN), ('error', State.CRIT), ('unknown-new', State.WARN)):
             uplink['syncStatus'] = status
             self.assertEqual(max(states(list(extended.check_uplink(name, section)))), state)
         uplink.update(syncStatus='in-sync', host={'powerState':'unknown','serverGroupMemberStatus':'unclean'})
@@ -179,7 +179,7 @@ class ExtendedTests(unittest.TestCase):
         self.assertEqual(metric(list(extended.check_inventory_snapshots(section)), 'morpheus_snapshot_count'), 2)
         del section['vms'][1]['snapshot_count']
         rows = list(extended.check_inventory_snapshots(section))
-        self.assertEqual(states(rows), [State.UNKNOWN])
+        self.assertEqual(states(rows), [State.WARN])
         self.assertFalse(any(row.args and row.args[0] == 'morpheus_snapshot_count' for row in rows))
 
     def test_vm_power_distinguishes_equal_names_and_expected_state(self):

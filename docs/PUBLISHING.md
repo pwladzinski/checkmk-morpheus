@@ -1,34 +1,58 @@
-# Publishing 1.1.0
+# Publish HPE Morpheus Monitoring 1.2.0
 
-Repository: https://github.com/pwladzinski/checkmk-morpheus
+Repository: https://github.com/pwladzinski/checkmk-morpheus  
+Existing Exchange listing: https://exchange.checkmk.com/p/morpheus
 
-All distributed documentation, examples and configuration text are in English. Each installation supplies its connection settings. No customer-specific site, address, VM prefix or credential is embedded in the package.
+Keep the package identity `morpheus`, version `1.2.0`, maintainer attribution and GPL-2.0-only license. This bundle is the requested 2026-11-20 revision of the earlier 1.2.0 archive; use its updated source, MKP and checksums together. Source, examples, configuration labels and release text are English and contain no customer defaults.
 
-## Update the source repository
+## 1. Update GitHub through the website
 
-Extract the source ZIP and upload its contents at the repository root. Keep `src`, `tests`, `docs` and `package` intact. Include `.gitignore` and `.gitattributes`. Review the diff and commit the 1.1.0 fixes. Do not introduce a duplicate versioned source directory. Do not upload site exports, raw API responses or credentials.
+1. Extract `Morpheus_Checkmk_2.4-2.5_MKP_1.2.0.zip` on your computer. The archive contains repository-root files directly.
+2. Open the repository's **Code** tab on `main`, then **Add file > Upload files**.
+3. Drag the extracted contents into the upload area: `src`, `tests`, `tools`, `docs`, `package` and the root files. Upload their contents at repository root; do not upload the ZIP as the source tree or add a versioned wrapper directory.
+4. Include `.gitignore` and `.gitattributes`. On macOS, press **Command + Shift + .** in Finder to display dotfiles. If the browser skips them, use **Add file > Create new file** with the exact filename and paste the supplied file content.
+5. Review replacement files. Use commit message `Release 1.2.0: maintenance states and Checkmk 2.5 compatibility`.
+6. Commit to `main`, or use a branch and review/merge it first. Confirm `README.md`, `src/morpheus/lib/status.py`, `docs/UPGRADE_1.2.0.md` and `package/morpheus-1.2.0.mkp` are visible at the expected paths.
 
-## Test the exact asset
+GitHub uploads replace matching files but do not remove old files automatically. Older versioned folders or ZIPs are not needed for the current source layout; remove those separately only when you intend to. Preserve project history through commits and release tags.
 
-Install `package/morpheus-1.1.0.mkp` on the target Checkmk 2.4 test site. Follow [UPGRADE_1.1.0.md](UPGRADE_1.1.0.md), including `cmk-validate-plugins`, discovery and failure/recovery checks. Local tests and public API validation are not a substitute for live validation.
+The supplied `.gitignore` explicitly permits `package/*.mkp`; build output under `dist/` remains ignored. The release ZIP contains the exact installable MKP in `package/`.
 
-## GitHub release
+## 2. Verify the exact package on a site
 
-1. Create tag `v1.1.0` from the reviewed source commit.
-2. Use title `HPE Morpheus Monitoring 1.1.0`.
-3. Paste [RELEASE_NOTES_1.1.0_EN.md](RELEASE_NOTES_1.1.0_EN.md).
-4. Attach `morpheus-1.1.0.mkp` and `SHA256SUMS.txt` from `package/`.
-5. Verify the attachments against the checksum before publishing.
+Use [UPGRADE_1.2.0.md](UPGRADE_1.2.0.md). Install matching code centrally and on relevant collecting/checking sites, including mixed 2.4/2.5 sites where supported by Checkmk. Run `cmk-validate-plugins`, collect without cache, verify maintenance/failure states, discover services and inspect graphs.
 
-The supplied MKP metadata includes the public project URL. Do not silently replace a published MKP with different bytes under the same version.
+The supplied [validation record](VALIDATION_1.2.0.md) covers local regressions and actual public APIs. It does not claim a live monitoring-core run.
 
-## Checkmk Exchange
+To rebuild and check the source package locally:
 
-On the existing package page choose **Add Version**, upload the MKP (not the ZIP) and provide the release description. Keep the same package identity and maintainer attribution. Review the terms and submit for moderation. A submission under review is not yet approved or publicly available.
+```bash
+python3 -m unittest discover -s tests -v
+python3 build.py --download-url https://github.com/pwladzinski/checkmk-morpheus
+python3 tests/validate_package.py
+```
 
-Description: [EXCHANGE_DESCRIPTION_EN.md](EXCHANGE_DESCRIPTION_EN.md).
+## 3. Create the GitHub release
 
-References:
+1. Open **Releases > Draft a new release**.
+2. Choose a new tag `v1.2.0`, targeting the reviewed `main` commit.
+3. Title: `HPE Morpheus Monitoring 1.2.0`.
+4. Paste [RELEASE_NOTES_1.2.0_EN.md](RELEASE_NOTES_1.2.0_EN.md).
+5. Attach `morpheus-1.2.0.mkp` and `SHA256SUMS.txt` from the extracted `package/` directory. GitHub also provides source archives from the tag automatically.
+6. Use the normal release label, not pre-release. Review the selected tag, assets and preview, then publish.
 
-- https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository
-- https://exchange.checkmk.com/how-to-upload
+Check the attachment against the checksum before publication. For this requested same-version revision, replace the earlier 1.2.0 draft assets together and verify the updated checksum. The installed collector identifies this revision as 2026-11-20; follow the upgrade guide for same-version reinstallation.
+
+## 4. Add the Exchange version
+
+Sign in with the account that owns the existing `morpheus` listing. Open its management/edit page and use **Add Version** (or the current new-version action). Keep the same listing rather than creating a second package.
+
+- Upload **`morpheus-1.2.0.mkp`**, not the source ZIP.
+- Confirm version **1.2.0**, title **HPE Morpheus Monitoring**, and author **Pawel Wladzinski <pawel.wladzinski@vayana.pl>**.
+- Confirm minimum **2.4.0**, Until Version **2.5.0p99**, and project URL.
+- Use [RELEASE_NOTES_1.2.0_EN.md](RELEASE_NOTES_1.2.0_EN.md) for version notes and [EXCHANGE_DESCRIPTION_EN.md](EXCHANGE_DESCRIPTION_EN.md) for the general listing description.
+- Retain the existing project icon, review the form and submit.
+
+Exchange may moderate the new version. An under-review submission is not yet approved. The package/source files have been prepared; no upload or publication is performed automatically.
+
+References: [GitHub release management](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository), [Checkmk Exchange upload guide](https://exchange.checkmk.com/how-to-upload).
